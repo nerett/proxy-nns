@@ -1,0 +1,73 @@
+#!/bin/bash
+
+if [ "$EUID" -ne 0 ]; then
+  exec sudo \
+    __DISP="$DISPLAY" \
+    __WAY="$WAYLAND_DISPLAY" \
+    __XAUTH="$XAUTHORITY" \
+    __XDG="$XDG_RUNTIME_DIR" \
+    __DBUS="$DBUS_SESSION_BUS_ADDRESS" \
+    /usr/local/bin/proxy-nns "$@"  # TODO: fix path
+  exit $?
+fi
+
+REAL_USER=${SUDO_USER}
+
+NS="proxy_ns"
+SOCKS_PORT=2080
+HOST_IP="10.200.200.1"
+NS_IP="10.200.200.2"
+VETH_HOST="veth_host"
+TUN2SOCKS_BIN="/usr/local/bin/tun2socks"
+
+if [ -z "$1" ]; then
+    >&2 echo "Usage: proxy-nns <command>"
+    exit 1
+else
+  CMD=("$@")
+fi
+
+cleanup() {
+  echo "Cleanup..."
+  kill $TUN_PID 2>/dev/null
+  firewall-cmd --zone=trusted --remove-interface=$VETH_HOST > /dev/null 2>&1
+  ip netns del $NS 2>/dev/null
+}
+trap cleanup EXIT
+
+echo "[1] Configuring network namespace and virtual network..."
+ip netns del $NS 2>/dev/null
+ip netns add $NS
+ip link add $VETH_HOST type veth peer name veth_ns
+ip link set veth_ns netns $NS
+
+ip addr add $HOST_IP/24 dev $VETH_HOST
+ip link set $VETH_HOST up
+ip netns exec $NS ip addr add $NS_IP/24 dev veth_ns
+ip netns exec $NS ip link set veth_ns up
+ip netns exec $NS ip link set lo up
+
+# OpenSuse-specific; TODO: fix (add more firewall options)
+firewall-cmd --zone=trusted --change-interface=$VETH_HOST > /dev/null 2>&1
+
+echo "[2] Launching tun2socks..."
+# Socks server must accept packages from $HOST_IP
+ip netns exec $NS $TUN2SOCKS_BIN -device tun0 -proxy socks5://$HOST_IP:$SOCKS_PORT &
+TUN_PID=$!
+sleep 1
+
+echo "[3] Setting up routing..."
+ip netns exec $NS ip link set tun0 up
+ip netns exec $NS ip route add 0.0.0.0/1 dev tun0
+ip netns exec $NS ip route add 128.0.0.0/1 dev tun0
+mkdir -p /etc/netns/$NS
+echo "nameserver 1.1.1.1" > /etc/netns/$NS/resolv.conf
+
+echo "[4] Launching command from $REAL_USER: ${CMD[*]}"
+ip netns exec $NS sudo -u $REAL_USER -E env \
+  DISPLAY="$__DISP" \
+  WAYLAND_DISPLAY="$__WAY" \
+  XDG_RUNTIME_DIR="$__XDG" \
+  XAUTHORITY="$__XAUTH" \
+  DBUS_SESSION_BUS_ADDRESS="$__DBUS" \
+  "${CMD[@]}"
