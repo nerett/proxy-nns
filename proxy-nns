@@ -1,5 +1,8 @@
 #!/bin/bash
 
+SOCKS_PORT=2080
+TUN2SOCKS_BIN="/usr/local/bin/tun2socks"
+
 SCRIPT_PATH="$(realpath "$0")"
 
 if [ "$EUID" -ne 0 ]; then
@@ -33,9 +36,6 @@ while true; do
     break
   fi
 done
-
-SOCKS_PORT=2080
-TUN2SOCKS_BIN="/usr/local/bin/tun2socks"
 
 if [ -z "$1" ]; then
     >&2 echo "Usage: proxy-nns <command>"
